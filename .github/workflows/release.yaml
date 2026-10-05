@@ -97,7 +97,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Build image
-        run: docker build -t ${{ env.IMAGE }}:${{ needs.tag_fix.outputs.fixed_tag }} build/tdx-qgs/
+        run: docker build -t ${{ env.IMAGE }}:${{ needs.tag_fix.outputs.fixed_tag }} -f build/tdx-qgs/Dockerfile .
 
       - name: Trivy scan image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # 0.36.0
@@ -107,6 +107,28 @@ jobs:
           exit-code: 1
           severity: CRITICAL,HIGH
           trivyignores: .trivyignore.yaml
+
+      - name: Install syft
+        id: syft
+        uses: anchore/sbom-action/download-syft@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+
+      - name: Fetch GPL sources
+        shell: bash
+        env:
+          SYFT: ${{ steps.syft.outputs.cmd }}
+          IMAGE_TAG: ${{ env.IMAGE }}:${{ needs.tag_fix.outputs.fixed_tag }}
+        run: |
+          mkdir /tmp/gpl-sources && cd /tmp/gpl-sources
+          "${SYFT}" scan -q "docker:${IMAGE_TAG}" -o template \
+            -t "${GITHUB_WORKSPACE}/build/tdx-qgs/gpl-sources.tmpl" > SOURCES
+          grep -q /glibc/ SOURCES && grep -q /gcc- SOURCES
+          while read -r url; do
+            curl -sSLf "${url}" | jq -r '.fileinfo | to_entries[] | "\(.key) \(.value[0].name)"' |
+              while read -r hash name; do
+                curl -sSLf "https://snapshot.debian.org/file/${hash}" -o "${name}"
+                echo "${hash}  ${name}" | sha1sum -c --quiet -
+              done
+          done < SOURCES
 
       - name: Login to Docker Hub
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -129,6 +151,24 @@ jobs:
 
       - name: Keyless sign image
         run: cosign sign --yes ${{ steps.digest.outputs.image_sha }}
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
+
+      - name: Attach GPL sources to the image
+        id: sources
+        working-directory: /tmp/gpl-sources
+        env:
+          IMAGE_SHA: ${{ steps.digest.outputs.image_sha }}
+        run: |
+          digest=$(oras attach --artifact-type application/vnd.intel.tdx-qgs.gpl-sources.v1 \
+            --annotation "org.opencontainers.image.description=Debian source packages of the LGPL/GPL libraries in the image" \
+            --format go-template='{{.digest}}' \
+            "${IMAGE_SHA}" *)
+          echo "ref=${IMAGE}@${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Keyless sign GPL sources
+        run: cosign sign --yes ${{ steps.sources.outputs.ref }}
 
   helm:
     name: Package, push and sign Helm chart

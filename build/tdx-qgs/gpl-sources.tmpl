@@ -1,0 +1,16 @@
+{{- /*
+Syft output template: snapshot.debian.org source file listings for the Debian
+source packages of glibc and the GCC runtime libraries in the image.
+*/ -}}
+{{- $urls := list -}}
+{{- range .artifacts -}}
+{{- if eq .type "deb" -}}
+{{- $src := .metadata.source | default .name -}}
+{{- if regexMatch "^(glibc|gcc-[0-9]+)$" $src -}}
+{{- $ver := .metadata.sourceVersion | default .version -}}
+{{- $urls = append $urls (printf "https://snapshot.debian.org/mr/package/%s/%s/srcfiles?fileinfo=1" $src $ver) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- range uniq $urls }}{{ . }}
+{{ end -}}

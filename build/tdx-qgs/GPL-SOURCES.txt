@@ -1,0 +1,16 @@
+This image includes the GNU C Library (glibc) and the GCC runtime libraries
+(libgcc, libstdc++, libgomp) from Debian. They are licensed under the LGPL and
+the GPL with the GCC Runtime Library Exception, respectively.
+
+The corresponding Debian source packages are published as an OCI artifact
+(artifact type application/vnd.intel.tdx-qgs.gpl-sources.v1) attached to each
+released image. To download them with ORAS (https://oras.land):
+
+  IMAGE=docker.io/intel/intel-tdx-qgs:<version>
+  SOURCES=$(oras discover --format json \
+    --artifact-type application/vnd.intel.tdx-qgs.gpl-sources.v1 "$IMAGE" \
+    | jq -r '.referrers[0].reference')
+  oras pull -o gpl-sources "$SOURCES"
+
+The SOURCES file in the artifact lists the snapshot.debian.org
+(https://snapshot.debian.org) URLs of the source packages.

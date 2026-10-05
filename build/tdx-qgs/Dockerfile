@@ -1,36 +1,6 @@
 # Copyright (c) 2026 Intel Corporation
 # SPDX-License-Identifier: Apache-2.0
 
-# Named early so gpl-sources can read its dpkg database for exact versions.
-FROM gcr.io/distroless/cc-debian13@sha256:159783207c2cd44c2aa5715961d13c8612368ac9bd450f887e3f08fc8ea461e3 AS final-base
-
-# Bundle source for the LGPL shared libs above (gcc-14, glibc).
-FROM rust:1.98.1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS gpl-sources
-WORKDIR /gpl-sources
-# Derive package=version from the pinned base image's own dpkg database
-# instead of hardcoding, so it never drifts from the pinned digest.
-# gcc-14-base covers libgcc-s1/libgomp1/libstdc++6 too (same source: gcc-14).
-COPY --from=final-base /var/lib/dpkg/status.d/libc6 \
-                  /var/lib/dpkg/status.d/gcc-14-base \
-                  /dpkg-status/
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl jq \
-    && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /dpkg-admin \
-    && for f in /dpkg-status/*; do printf 'Status: install ok installed\n'; cat "$f"; echo; done \
-         > /dpkg-admin/status \
-    && PKGS=$(dpkg-query --admindir=/dpkg-admin -f '${source:Package}=${source:Version}\n' \
-         -W $(ls /dpkg-status) | sort -u) \
-    && for pv in $PKGS; do \
-         pkg=${pv%=*}; ver=${pv#*=}; \
-         echo "Fetching LGPL source for: $pv"; \
-         curl -sSLf "https://snapshot.debian.org/mr/package/$pkg/$ver/srcfiles?fileinfo=1" \
-           | jq -r '.fileinfo | to_entries[] | .key as $hash | .value[0].name as $name | "\($hash) \($name)"' \
-           | while read -r hash name; do \
-               curl -sSLf "https://snapshot.debian.org/file/$hash" -o "$name"; \
-             done; \
-       done
-
 FROM rust:1.98.1-slim-trixie@sha256:4cd829461bd5c4d511c32e269da9cb8929223b666519d8004e35fc8d1d771ab7 AS builder
 
 # Install build dependencies
@@ -125,10 +95,10 @@ RUN dpkg-query -W -f='${Package}\n' > /tmp/base-pkglist.txt \
     && cp /build/target/release/pck-cert-tool /rootfs/usr/local/bin/
 
 COPY LICENSE /rootfs/usr/local/share/pck-cert-tool/LICENSE
-COPY --from=gpl-sources /gpl-sources /rootfs/usr/local/share/pck-cert-tool/gpl-sources
+COPY build/tdx-qgs/GPL-SOURCES.txt /rootfs/usr/local/share/pck-cert-tool/GPL-SOURCES.txt
 
 # Final stage — distroless/cc-debian13 provides glibc, libgcc, libstdc++, libssl, ca-certificates
-FROM final-base
+FROM gcr.io/distroless/cc-debian13@sha256:159783207c2cd44c2aa5715961d13c8612368ac9bd450f887e3f08fc8ea461e3
 COPY --from=builder /rootfs/ /
 
 # QCNL local caching is the only supported mode: this image ships without curl/libcurl,
