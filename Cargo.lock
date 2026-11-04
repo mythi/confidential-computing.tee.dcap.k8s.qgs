@@ -1626,6 +1626,7 @@ dependencies = [
  "ring",
  "rustls",
  "serde",
+ "serde-saphyr",
  "serde_json",
  "tokio",
  "tracing",
