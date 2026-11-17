@@ -16,17 +16,16 @@ use kube::{
 };
 use pck_cert_tool::FIELD_MANAGER;
 use pck_cert_tool::cache::parse_cache_blob;
-use pck_cert_tool::offline::{export_platforms_to_file, fetch_secrets_to_file};
 use pck_cert_tool::pck_secret::{
-    CreatePckSecretInput, create_pck_secret, patch_piid_index, pck_secret_is_valid, pck_secret_name,
+    create_pck_secret, patch_piid_index, pck_secret_is_valid, pck_secret_name,
 };
 use pck_cert_tool::pcs_client::{
-    PckCertsRequest, PcsApiError, PcsPause, PcsRateLimited, build_pcs_http_client, fetch_pcm,
-    fetch_platform_cache, verify_pcm,
+    PckCertsRequest, PcsApiError, PcsPause, PcsRateLimited, build_pcs_http_client,
 };
 use pck_cert_tool::platform_data::{
     QE_ID_HEX_LEN, is_fixed_len_hex, prepare_registration, registration_fingerprint,
 };
+use pck_cert_tool::registration::{register_from_file, resolve_platform};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
@@ -71,8 +70,6 @@ enum Commands {
     Register(RegisterArgs),
     /// Readiness/liveness probe helpers (exit 0 = ok, 1 = not ok)
     Probe(ProbeArgs),
-    /// Export platform request list from cluster secrets to a JSON file (offline step 1)
-    ExportRequests(ExportRequestsArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -141,7 +138,8 @@ struct RegisterArgs {
     #[arg(short, long, default_value = "default")]
     namespace: String,
 
-    /// Platform request JSON file; enables finite file mode and requires --output-file
+    /// platform-data Secrets file (`kubectl get secret -l type=platform-data -o yaml`); enables
+    /// finite file mode and requires --output-file
     #[arg(short = 'i', long, requires = "output_file")]
     input_file: Option<PathBuf>,
 
@@ -168,22 +166,6 @@ enum ProbeCommands {
 struct ProbePathArgs {
     /// Path to check
     path: PathBuf,
-}
-
-/// Arguments for the export-requests command
-#[derive(Parser, Debug)]
-pub struct ExportRequestsArgs {
-    /// Kubernetes namespace holding platform-data secrets
-    #[arg(short = 'n', long, default_value = "intel-dcap-operator-system")]
-    namespace: String,
-
-    /// Label selector used to find platform-data secrets
-    #[arg(long, default_value = "type=platform-data")]
-    selector: String,
-
-    /// Output JSON file for platform requests
-    #[arg(short = 'o', long, default_value = "platform_requests.json")]
-    output_file: PathBuf,
 }
 
 fn copy_fixed_hex_field<const N: usize>(value: &str, field: &str) -> Result<[u8; N]> {
@@ -738,7 +720,6 @@ async fn process_platform_secret(
         &secret_name,
         &ctx.namespace,
         &request_body,
-        &platform_data_fingerprint,
     )
     .await
     {
@@ -773,38 +754,17 @@ async fn register_platform(
     secret_name: &str,
     namespace: &str,
     request_body: &PckCertsRequest,
-    platform_data_fingerprint: &str,
 ) -> Result<()> {
-    info!("Requesting PCK certificates from Intel PCS API");
-    let platform_cache = fetch_platform_cache(http_client, api_key, request_body).await?;
+    // Resolve everything before writing: once the PCK secret is valid, registration is skipped
+    // and a missing PIID index entry is never retried.
+    let platform =
+        resolve_platform(http_client, api_key, secret_name, namespace, request_body).await?;
 
-    // Fetch and verify the Platform Composition Manifest before writing anything: once the PCK
-    // secret is valid, registration is skipped and a missing PIID index entry is never retried.
-    let pcm = fetch_pcm(http_client, api_key, &request_body.platform_manifest).await?;
-    verify_pcm(
-        &pcm.body,
-        &pcm.issuer_chain,
-        &platform_cache.pck_issuer_chain,
-    )
-    .context("Failed to verify the Platform Composition Manifest")?;
-
-    // Write the PCK certificate secret for this platform.
-    create_pck_secret(
-        secrets,
-        CreatePckSecretInput {
-            fmspc: platform_cache.fmspc,
-            cache_data: platform_cache.cache_data,
-            expiration_time: platform_cache.expiration_time,
-            namespace: namespace.to_string(),
-            platform_data_fingerprint: platform_data_fingerprint.to_string(),
-            pck_secret_name: pck_secret_name(secret_name),
-        },
-    )
-    .await?;
+    create_pck_secret(secrets, platform.pck_secret).await?;
 
     // Record the verified Platform Composition Manifest in the shared PIID index secret,
     // keyed by the QE ID (which is the platform-data secret name).
-    patch_piid_index(secrets, namespace, secret_name, &pcm.body).await?;
+    patch_piid_index(secrets, namespace, &platform.qe_id, &platform.pcm).await?;
 
     Ok(())
 }
@@ -854,7 +814,7 @@ async fn main() -> Result<()> {
 
             match (reg_args.input_file, reg_args.output_file) {
                 (Some(input_file), Some(output_file)) => {
-                    fetch_secrets_to_file(
+                    register_from_file(
                         &input_file,
                         &output_file,
                         &reg_args.namespace,
@@ -892,14 +852,6 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::ExportRequests(export_args) => {
-            export_platforms_to_file(
-                export_args.output_file,
-                export_args.namespace,
-                export_args.selector,
-            )
-            .await?;
-        }
     }
 
     Ok(())
